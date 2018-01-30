@@ -67,9 +67,8 @@ public class JmxCollector extends Collector implements Collector.Describable {
     private File configFile;
     private long createTimeNanoSecs = System.nanoTime();
 
-    private static final Pattern snakeCasePattern = Pattern.compile("([a-z0-9])([A-Z])");
-
     private final JmxMBeanPropertyCache jmxMBeanPropertyCache = new JmxMBeanPropertyCache();
+    private final RulePatternCache rulePatternCache = new RulePatternCache();
 
     public JmxCollector(File in) throws IOException, MalformedObjectNameException {
         configFile = in;
@@ -299,6 +298,18 @@ public class JmxCollector extends Collector implements Collector.Describable {
           type, help);
       }
 
+      String toSnakeCase(String attrName) {
+        StringBuilder resultBuilder = new StringBuilder(attrName.substring(0,1).toLowerCase());
+        for (char attrChar : attrName.substring(1).toCharArray()) {
+          if (Character.isUpperCase(attrChar)) {
+            resultBuilder.append("_").append(Character.toLowerCase(attrChar));
+          } else {
+            resultBuilder.append(attrChar);
+          }
+        }
+        return resultBuilder.toString();
+      }
+
       public void recordBean(
           String domain,
           LinkedHashMap<String, String> beanProperties,
@@ -312,29 +323,22 @@ public class JmxCollector extends Collector implements Collector.Describable {
         // attrDescription tends not to be useful, so give the fully qualified name too.
         String help = attrDescription + " (" + beanName + attrName + ")";
 
-        String attrNameSnakeCase = snakeCasePattern.matcher(attrName).replaceAll("$1_$2").toLowerCase();
+        String attrNameSnakeCase = toSnakeCase(attrName);
+
+        // Evict patterns no longer listed in the rules
+        // TODO
 
         for (Rule rule : config.rules) {
           Matcher matcher = null;
           String matchName = beanName + (rule.attrNameSnakeCase ? attrNameSnakeCase : attrName);
           if (rule.pattern != null) {
-            matcher = rule.pattern.matcher(matchName + ": " + beanValue);
-            if (!matcher.matches()) {
-              continue;
+            if (!rulePatternCache.checkAndStoreMatchName(rule.pattern, matchName + ": ")) {
+                continue;
             }
+            matcher = rulePatternCache.getMatcher(rule.pattern, matchName + ": ");
           }
 
           Number value;
-          if (rule.value != null && !rule.value.isEmpty()) {
-            String val = matcher.replaceAll(rule.value);
-
-            try {
-              beanValue = Double.valueOf(val);
-            } catch (NumberFormatException e) {
-              LOGGER.fine("Unable to parse configured value '" + val + "' to number for bean: " + beanName + attrName + ": " + beanValue);
-              return;
-            }
-          }
           if (beanValue instanceof Number) {
             value = ((Number)beanValue).doubleValue() * rule.valueFactor;
           } else if (beanValue instanceof Boolean) {
